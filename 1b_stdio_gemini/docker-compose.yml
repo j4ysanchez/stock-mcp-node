@@ -1,0 +1,13 @@
+services:
+  app:
+    build: .
+    stdin_open: true
+    tty: true
+    environment:
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - CACHE_FILE_PATH=/data/cache.json
+    volumes:
+      - stock_cache:/data
+
+volumes:
+  stock_cache:
