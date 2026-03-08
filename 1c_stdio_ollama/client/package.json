@@ -1,0 +1,17 @@
+{
+  "name": "stock-mcp-client-ollama",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "start": "npx tsx cli.ts"
+  },
+  "dependencies": {
+    "openai": "^4.77.0",
+    "@modelcontextprotocol/sdk": "^1.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0"
+  }
+}

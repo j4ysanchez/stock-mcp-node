@@ -1,0 +1,16 @@
+services:
+  app:
+    build: .
+    stdin_open: true
+    tty: true
+    environment:
+      - OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-http://host.docker.internal:11434/v1}
+      - MODEL=${MODEL:-gemma3:4b}
+      - CACHE_FILE_PATH=/data/cache.json
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - stock_cache:/data
+
+volumes:
+  stock_cache:
