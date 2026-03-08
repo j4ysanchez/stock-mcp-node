@@ -1,0 +1,34 @@
+services:
+  mcp-server:
+    build: ./server
+    ports:
+      - "8001:8001"
+    volumes:
+      - stock_cache:/data
+    environment:
+      - CACHE_FILE_PATH=/data/cache.json
+      - HOST=0.0.0.0
+      - PORT=8001
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8001/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  mcp-client:
+    build: ./client
+    depends_on:
+      mcp-server:
+        condition: service_healthy
+    stdin_open: true
+    tty: true
+    environment:
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - MCP_SERVER_URL=http://mcp-server:8001/sse
+
+networks:
+  default:
+    name: stock_net
+
+volumes:
+  stock_cache:
