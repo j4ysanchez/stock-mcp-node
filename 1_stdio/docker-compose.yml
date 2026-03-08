@@ -1,0 +1,13 @@
+services:
+  app:
+    build: .
+    stdin_open: true
+    tty: true
+    environment:
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - CACHE_FILE_PATH=/data/cache.json
+    volumes:
+      - stock_cache:/data
+
+volumes:
+  stock_cache:

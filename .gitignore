@@ -1,0 +1,30 @@
+# Dependencies
+**/node_modules/
+
+# local cached data
+**/data/cache.json
+
+# TypeScript build output
+**/dist/
+**/build/
+**/*.js.map
+**/*.d.ts.map
+
+# ts-node cache
+**/.cache/
+
+# Environment variables
+.env
+.env.local
+.env.*.local
+
+# Logs
+*.log
+npm-debug.log*
+
+# OS
+.DS_Store
+
+# Editor
+.vscode/
+.idea/
