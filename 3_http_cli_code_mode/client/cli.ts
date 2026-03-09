@@ -96,7 +96,7 @@ async function main() {
   const ask = () => {
     rl.question("You: ", async (input) => {
       const trimmed = input.trim();
-      if (!trimmed || trimmed.toLowerCase() === "exit") {
+      if (!trimmed || new Set(["exit", "quit", "bye"]).has(trimmed.toLowerCase())) {
         console.log("Goodbye!");
         await mcpClient.close();
         rl.close();
