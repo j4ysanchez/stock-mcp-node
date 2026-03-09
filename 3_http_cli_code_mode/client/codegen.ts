@@ -18,7 +18,7 @@ export function mcpToolsToTypeScript(tools: Tool[]): string {
 
 export function buildSystemPrompt(toolDefs: string): string {
   return `You are a stock research assistant. Answer the user's question by writing a \
-single async TypeScript function called \`run()\` that uses the tools below.
+single async TypeScript function called \`run()\` that fetches the required data using the tools below.
 Return ONLY the code block — no explanation, no markdown prose outside the code fence.
 
 Available tools (already bound in scope — do NOT import or declare them):
@@ -28,7 +28,7 @@ ${toolDefs}
 
 Rules:
 - Always call \`run()\` with no arguments.
-- Return a human-readable string from \`run()\`.
+- Return the raw fetched data as a JSON string using \`JSON.stringify(result)\` — do NOT format or summarise.
 - You may call tools in parallel with \`Promise.all\`.
 - Tickers available: AAPL, AMZN, GOOGL, META, MSFT, NFLX, NVDA, TSLA.
 
@@ -39,7 +39,11 @@ async function run() {
     get_current_price("AAPL"),
     get_stock_overview("AAPL"),
   ]);
-  return \`\${overview.shortName} trades at $\${price.price} (P/E \${overview.trailingPE})\`;
+  return JSON.stringify({ price, overview });
 }
 \`\`\``;
 }
+
+export const FORMAT_INSTRUCTION =
+  "Using the raw data above, write a detailed, well-formatted response to the user's original question. " +
+  "Include all relevant fields. Do not call any tools.";

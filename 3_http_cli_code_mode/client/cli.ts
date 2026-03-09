@@ -2,7 +2,7 @@ import { GoogleGenerativeAI, ChatSession } from "@google/generative-ai";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { SSEClientTransport } from "@modelcontextprotocol/sdk/client/sse.js";
 import * as readline from "readline";
-import { mcpToolsToTypeScript, buildSystemPrompt } from "./codegen.js";
+import { mcpToolsToTypeScript, buildSystemPrompt, FORMAT_INSTRUCTION } from "./codegen.js";
 import { runInSandbox } from "./sandbox.js";
 
 const MODEL = process.env.MODEL ?? "gemini-3.1-flash-lite-preview";
@@ -39,12 +39,20 @@ async function agentTurn(
   const code = extractCodeBlock(raw);
 
   process.stdout.write("\n\n[Executing...]\n");
-  const answer = await runInSandbox(code, mcpClient, tools);
+  const rawJson = await runInSandbox(code, mcpClient, tools);
 
-  // Feed the execution result back so follow-up questions have context.
-  await chat.sendMessage(`Tool execution result:\n${answer}`);
-
-  process.stdout.write(`\nAssistant: ${answer}\n\n`);
+  // Step 2: feed the raw data back and ask Gemini to format it.
+  process.stdout.write("[Formatting...]\n\nAssistant: ");
+  const formatStream = await chat.sendMessageStream(
+    `Raw data:\n${rawJson}\n\n${FORMAT_INSTRUCTION}`
+  );
+  let answer = "";
+  for await (const chunk of formatStream.stream) {
+    const text = chunk.text();
+    if (text) { process.stdout.write(text); answer += text; }
+  }
+  await formatStream.response;
+  process.stdout.write("\n\n");
 }
 
 async function main() {
