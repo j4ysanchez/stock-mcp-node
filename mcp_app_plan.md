@@ -5,10 +5,10 @@
 |---|---|---|---|
 | `1_stdio/` | stdio (subprocess) | CLI | planned |
 | `2_http_cli/` | HTTP/SSE | CLI (2 containers) | planned |
-| `3_vscode_notebook/` | HTTP/SSE | Test Script | planned |
+| `3_http_cli_code_mode/` | HTTP/SSE | CLI (2 containers) + Code Mode | planned |
 | `4_express_html/` | HTTP/SSE | Express + vanilla HTML | planned |
 | `5_express_react/` | HTTP/SSE | Express + React | planned |
-| `6_code_mode/` | HTTP/SSE | Express + React + Cloudflare Code Mode | planned |
+| `6_express_react_code_mode/` | HTTP/SSE | Express + React + Code Mode | planned |
 
 ---
 
@@ -209,117 +209,202 @@ docker compose run --rm mcp-client        # attach interactive CLI
 
 ---
 
-## Phase 3 — `3_vscode_notebook/` (planned)
+## Phase 3 — `3_http_cli_code_mode/` (planned)
 
 ### Context
 
-Each phase is self-contained. This phase bundles its own copy of the MCP server
-so it can be run without any dependency on other phase directories. The notebook
-client (VS Code notebook or simple interactive script) connects to the local server
-over HTTP/SSE — but instead of an interactive CLI loop, it demonstrates:
-concepts in isolation: raw tool invocation, single-turn Claude queries, and
-multi-turn conversation.
+Each phase is self-contained. This phase keeps the same two-container CLI setup
+as Phase 2 (Gemini) but replaces the traditional function-calling agentic loop
+with **Cloudflare's Code Mode** pattern.
 
-Key learning: MCP tools can be called directly without Claude. Claude is just
-one consumer of the MCP protocol — interactive testing makes it easy to inspect
-tool schemas, test raw calls, and trace the agentic loop step by step.
+Instead of passing a `tools:` array to Gemini and looping over `functionCall`
+blocks, the client converts MCP tool schemas into TypeScript function signatures,
+embeds them in the system prompt, and asks Gemini to write a `run()` function
+that calls those APIs directly. The generated code executes in a Node.js
+`vm.Script` sandbox where each function is bound to `mcpClient.callTool()`.
+Only the final return value of `run()` is sent back to the model.
+
+Key learning: LLMs have seen vastly more TypeScript in training data than
+structured `functionCall` JSON. Code mode lets Gemini express multi-step logic
+(conditionals, parallel calls, aggregations) in a single generation pass,
+eliminating repeated model round-trips for chained tool calls.
+Reference: [Cloudflare Blog — Code Mode](https://blog.cloudflare.com/code-mode/)
 
 ### Architecture
 
 ```
-Interactive Script (localhost)  -->  MCP Server (port 8001/SSE)
-  MCP Client session              @modelcontextprotocol/sdk + yahoo-finance-api + JSON file cache
-  Anthropic SDK (optional)
+[client container]                          [server container]
+CLI (client/cli.ts)                         MCP Server (server/server.ts)
+  Gemini (gemini-2.0-flash)    <-- SSE -->  Express on :8001
+  1. list MCP tools on startup              yahoo-finance-api + JSON file cache
+  2. generate TS type defs
+  3. Gemini writes run() code (no tools: array)
+  4. execute in vm.Script sandbox
+  5. return result as assistant reply
 ```
 
-The MCP server runs in Docker; the test script runs locally and connects to it.
+Docker network: `stock_net`
+Server exposed at: `http://mcp-server:8001/sse`
 
 ### File Structure
 
 ```
-3_vscode_notebook/
-├── docker-compose.yml     # spins up the MCP server
+3_http_cli_code_mode/
+├── docker-compose.yml
 ├── .env.example
-├── server/                # copied from 2_http_cli/server/ — no changes
+├── server/                # copied from 2_http_cli_gemini/server/ — no changes
 │   ├── Dockerfile
 │   ├── server.ts
 │   ├── cache.ts
 │   └── package.json
-├── test.ts               # 4 scenarios: setup, list tools, raw query, agentic loop
-└── package.json          # @modelcontextprotocol/sdk, @anthropic-ai/sdk
+└── client/
+    ├── Dockerfile
+    ├── cli.ts             # code mode agentic loop; Gemini writes TS, vm executes it
+    ├── codegen.ts         # MCP schema → TS function signatures + system prompt
+    ├── sandbox.ts         # vm.Script executor with MCP tool bindings
+    └── package.json       # @google/generative-ai, @modelcontextprotocol/sdk
 ```
 
-### Test Script Scenarios
+### Code Mode Flow
 
-| Scenario | What it demonstrates |
-|---|---|
-| 1 | Setup & imports: SSE client & session initialization |
-| 2 | Connect & list tools: `session.listTools()` — raw MCP tool schemas |
-| 3 | Raw tool call (no Claude): `session.callTool()` — MCP without AI |
-| 4 | Single-turn Claude query: Resolve one round of tool calls |
-| 5 | Multi-turn agentic loop: Full interactive conversation |
+1. **Startup** — connect to MCP server over SSE, call `listTools()`, convert schemas
+   to TypeScript function signatures via `codegen.ts`
+2. **Per turn** — send user message to Gemini with TS type defs in system prompt
+   (no `tools:` array); Gemini returns a single code block
+3. **Execute** — `sandbox.ts` runs the code in `vm.Script`; each TS function call
+   routes to `mcpClient.callTool()` under the hood
+4. **Reply** — the string returned by `run()` is the assistant's answer; append to
+   conversation history and loop
 
-### Key Implementation Notes
+### `client/codegen.ts`
 
-**test.ts — connect and list tools:**
 ```typescript
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { SSEClientTransport } from "@modelcontextprotocol/sdk/client/sse.js";
+import { Tool } from "@modelcontextprotocol/sdk/types.js";
 
-const transport = new SSEClientTransport(new URL(MCP_SERVER_URL));
-const client = new Client({ name: "test", version: "1.0.0" }, { capabilities: {} });
-await client.connect(transport);
+export function mcpToolsToTypeScript(tools: Tool[]): string {
+  return tools.map(t => {
+    const props = t.inputSchema.properties as Record<string, { type: string; description?: string }> ?? {};
+    const params = Object.entries(props)
+      .map(([k, v]) => `/** ${v.description ?? ""} */ ${k}: ${v.type}`)
+      .join(", ");
+    return `/** ${t.description} */\nasync function ${t.name}(${params}): Promise<any>;`;
+  }).join("\n\n");
+}
 
-const tools = await client.listTools();
-for (const tool of tools.tools) {
-  console.log(`${tool.name}: ${tool.description}`);
+export function buildSystemPrompt(toolDefs: string): string {
+  return `You are a stock research assistant. Answer the user's question by writing a
+single async TypeScript function called \`run()\` that uses the tools below.
+Return ONLY the code block — no explanation, no markdown prose.
+
+Available tools (already bound in scope — do NOT import or declare them):
+\`\`\`typescript
+${toolDefs}
+\`\`\`
+
+Example:
+\`\`\`typescript
+async function run() {
+  const price = await get_current_price("AAPL");
+  const overview = await get_stock_overview("AAPL");
+  return \`\${overview.shortName} trades at $\${price.price} (P/E \${overview.trailingPE})\`;
+}
+\`\`\``;
 }
 ```
 
-**test.ts — raw tool call (Claude not involved):**
+### `client/sandbox.ts`
+
 ```typescript
-const result = await client.callTool("get_current_price", { ticker: "AAPL" });
-console.log(JSON.stringify(result, null, 2));
+import vm from "node:vm";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+
+export async function runInSandbox(
+  code: string,
+  mcpClient: Client,
+  toolNames: string[]
+): Promise<string> {
+  // Bind each MCP tool as an async function in the sandbox scope
+  const bindings: Record<string, unknown> = {};
+  for (const name of toolNames) {
+    bindings[name] = async (args: Record<string, unknown>) => {
+      const result = await mcpClient.callTool({ name, arguments: args });
+      const content = result.content as { type: string; text?: string }[];
+      const first = content[0];
+      return first?.type === "text" ? JSON.parse(first.text ?? "null") : content;
+    };
+  }
+
+  const context = vm.createContext({ ...bindings, __result: undefined });
+  // Wrap so we can capture the return value of run()
+  const wrapped = `(async () => { ${code}\n __result = await run(); })()`;
+  await vm.runInContext(wrapped, context);
+  return String(context.__result);
+}
 ```
 
-**test.ts — single-turn query with tool resolution:**
+### `client/cli.ts` — agentic loop (code mode)
+
 ```typescript
-const response = await anthropic.messages.create({
-  model: "claude-sonnet-4-6",
-  max_tokens: 1024,
-  system: SYSTEM_PROMPT,
-  tools: anthropicTools,
-  messages: [{ role: "user", content: "What is NVDA's current price?" }],
+// On startup
+const { tools } = await mcpClient.listTools();
+const toolDefs = mcpToolsToTypeScript(tools);
+const systemPrompt = buildSystemPrompt(toolDefs);
+const toolNames = tools.map(t => t.name);
+
+// Gemini model — no tools: array
+const model = genAI.getGenerativeModel({
+  model: MODEL,
+  systemInstruction: systemPrompt,
+  // no tools: [] — code mode replaces function calling
 });
-// resolve tool_use blocks -> call client.callTool() -> send result back
+const chat = model.startChat({ history: [] });
+
+// Per turn
+async function agentTurn(userMessage: string): Promise<string> {
+  // Stream the generated code as it arrives
+  const streamResult = await chat.sendMessageStream(userMessage);
+  let raw = "";
+  process.stdout.write("\n[Gemini generating code...]\n");
+  for await (const chunk of streamResult.stream) {
+    const text = chunk.text();
+    if (text) { process.stdout.write(text); raw += text; }
+  }
+  await streamResult.response;           // await full resolution
+
+  // Extract the ```typescript ... ``` block
+  const match = raw.match(/```(?:typescript|ts)?\n([\s\S]*?)```/);
+  if (!match) throw new Error("No code block in Gemini response");
+
+  // Execute in sandbox — MCP calls happen here
+  process.stdout.write("\n[Executing...]\n");
+  const answer = await runInSandbox(match[1], mcpClient, toolNames);
+
+  // Append result to chat history so follow-up questions have context
+  await chat.sendMessage(`Tool execution result:\n${answer}`);
+  return answer;
+}
 ```
 
-### What Changes vs Phase 2
+### What Changes vs Phase 2 (Gemini + tool_use)
 
-| Concern | Phase 2 | Phase 3 |
+| Concern | Phase 2 Gemini | Phase 3 Code Mode |
 |---|---|---|
-| Client runtime | Docker container | Local Node.js / ts-node |
-| Interaction model | Interactive CLI loop | Test script with named scenarios |
-| Claude dependency | Required | Optional (Scenario 3 skips it) |
-| MCP connection scope | Full session | Per scenario (new client) |
-| Self-contained | Yes | Yes — own server/ copy + docker-compose |
+| Agentic loop | Multi-turn `functionCall` / `functionResponse` | Single Gemini call per turn |
+| Tool invocation | Gemini structured blocks | Gemini-written TypeScript |
+| Execution | Client calls `mcpClient.callTool()` on each turn | `vm.Script` sandbox with MCP bindings |
+| `tools:` in API call | Required (`functionDeclarations`) | Omitted — TS sigs in system prompt |
+| Token overhead | Each tool result re-enters the model | Only final `run()` return value |
+| Multi-step logic | LLM decides step by step | LLM writes the full plan as code |
+| Streaming | Gemini text + tool results streamed | Generated code streamed; result printed after exec |
+| Containers | 2 (server + client) | 2 (unchanged) |
 
 ### Running
 
 ```bash
-cd 3_vscode_notebook
-cp .env.example .env              # add ANTHROPIC_API_KEY
-
-# 1. Start the local MCP server
-docker compose up -d mcp-server
-
-# 2. Install test dependencies
-npm install
-
-# 3. Run test scenarios
-MCP_SERVER_URL=http://localhost:8001/sse \
-ANTHROPIC_API_KEY=sk-... \
-npm run test
+cd 3_http_cli_code_mode
+cp .env.example .env   # add GEMINI_API_KEY
+docker compose up --build -d mcp-server   # start server first
+docker compose run --rm mcp-client        # attach interactive CLI
 ```
 
 ---
@@ -441,16 +526,17 @@ async function sendMessage(text) {
 }
 ```
 
-### What Changes vs Phase 3 (Test Script)
+### What Changes vs Phase 3 (Code Mode CLI)
 
 | Concern | Phase 3 | Phase 4 |
 |---|---|---|
-| Client type | Node.js test script | Browser (vanilla JS) |
+| Client type | Docker CLI (Gemini + code mode) | Browser (vanilla JS) |
+| LLM | Gemini | Claude |
+| Agentic pattern | Code Mode (vm.Script) | Traditional tool_use loop |
 | Express bridge | None | Introduced |
 | SSE to browser | No | Yes — `fetch` + `ReadableStream` |
-| Session management | Per scenario | `sessionStorage` UUID |
-| Containers | 1 (server only) | 2 (server + api) |
-| Claude required | Optional | Always |
+| Session management | readline loop | `sessionStorage` UUID |
+| Containers | 2 (server + client) | 2 (server + api) |
 
 ### Running
 
@@ -654,7 +740,7 @@ docker compose up --build
 
 ---
 
-## Phase 6 — `6_code_mode/` (planned)
+## Phase 6 — `6_express_react_code_mode/` (planned)
 
 Each phase is self-contained. This phase carries over the Phase 5 React + Express
 stack but replaces the traditional `tool_use` agentic loop with **Cloudflare's
@@ -686,7 +772,7 @@ Three Docker containers on `stock_net` — same count as Phase 5.
 ### File Structure
 
 ```
-6_code_mode/
+6_express_react_code_mode/
 ├── docker-compose.yml
 ├── .env.example
 ├── server/                    # copied from 2_http_cli/server/ — no changes
