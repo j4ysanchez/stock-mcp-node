@@ -17,11 +17,12 @@ function extractCodeBlock(raw: string): string {
 
 async function agentTurn(
   chat: ChatSession,
+  formatChat: ChatSession,
   mcpClient: Client,
   tools: Awaited<ReturnType<Client["listTools"]>>["tools"],
   userMessage: string
 ): Promise<void> {
-  // Ask Gemini to write a run() function — stream the generated code.
+  // Step 1: ask the code-mode model to write a run() that fetches the data.
   const streamResult = await chat.sendMessageStream(userMessage);
 
   process.stdout.write("\n[Gemini generating code...]\n");
@@ -35,21 +36,19 @@ async function agentTurn(
   }
   await streamResult.response; // ensure fully resolved
 
-  // Extract and execute the TypeScript code block.
+  // Step 2: execute the code in the sandbox to get raw JSON.
   const code = extractCodeBlock(raw);
-
   process.stdout.write("\n\n[Executing...]\n");
   const rawJson = await runInSandbox(code, mcpClient, tools);
 
-  // Step 2: feed the raw data back and ask Gemini to format it.
+  // Step 3: pass the raw data to a plain model (no code-mode system prompt) for narrative.
   process.stdout.write("[Formatting...]\n\nAssistant: ");
-  const formatStream = await chat.sendMessageStream(
-    `Raw data:\n${rawJson}\n\n${FORMAT_INSTRUCTION}`
+  const formatStream = await formatChat.sendMessageStream(
+    `The user asked: "${userMessage}"\n\nRaw data:\n${rawJson}\n\n${FORMAT_INSTRUCTION}`
   );
-  let answer = "";
   for await (const chunk of formatStream.stream) {
     const text = chunk.text();
-    if (text) { process.stdout.write(text); answer += text; }
+    if (text) process.stdout.write(text);
   }
   await formatStream.response;
   process.stdout.write("\n\n");
@@ -80,6 +79,9 @@ async function main() {
   });
   const chat = model.startChat({ history: [] });
 
+  // Separate model with no system prompt for narrative formatting.
+  const formatChat = genAI.getGenerativeModel({ model: MODEL }).startChat({ history: [] });
+
   console.log(`Stock Research CLI (Gemini Code Mode) — ${mcpTools.length} tools loaded`);
   console.log("Tickers: AAPL, AMZN, GOOGL, META, MSFT, NFLX, NVDA, TSLA");
   console.log('Type your question or "exit" to quit.\n');
@@ -104,7 +106,7 @@ async function main() {
       }
 
       try {
-        await agentTurn(chat, mcpClient, mcpTools, trimmed);
+        await agentTurn(chat, formatChat, mcpClient, mcpTools, trimmed);
       } catch (err) {
         console.error(`Error: ${err instanceof Error ? err.message : String(err)}`);
       }

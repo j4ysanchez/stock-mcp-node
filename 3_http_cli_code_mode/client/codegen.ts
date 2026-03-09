@@ -17,8 +17,8 @@ export function mcpToolsToTypeScript(tools: Tool[]): string {
 }
 
 export function buildSystemPrompt(toolDefs: string): string {
-  return `You are a stock research assistant. Answer the user's question by writing a \
-single async TypeScript function called \`run()\` that fetches the required data using the tools below.
+  return `You are a stock data fetcher. When given a question, write a single async TypeScript \
+function called \`run()\` that fetches the required data using the tools below and returns it as a JSON string.
 Return ONLY the code block — no explanation, no markdown prose outside the code fence.
 
 Available tools (already bound in scope — do NOT import or declare them):
@@ -28,7 +28,7 @@ ${toolDefs}
 
 Rules:
 - Always call \`run()\` with no arguments.
-- Return the raw fetched data as a JSON string using \`JSON.stringify(result)\` — do NOT format or summarise.
+- Return the raw fetched data as a JSON string using \`JSON.stringify(result)\`.
 - You may call tools in parallel with \`Promise.all\`.
 - Tickers available: AAPL, AMZN, GOOGL, META, MSFT, NFLX, NVDA, TSLA.
 
@@ -45,5 +45,6 @@ async function run() {
 }
 
 export const FORMAT_INSTRUCTION =
-  "Using the raw data above, write a detailed, well-formatted response to the user's original question. " +
-  "Include all relevant fields. Do not call any tools.";
+  "You are a stock research assistant. Using the raw data above, write an insightful, " +
+  "conversational response to the user's question. Include context, analysis, and relevant comparisons — " +
+  "not just a list of numbers. Do not output any code.";
